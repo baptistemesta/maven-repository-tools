@@ -12,6 +12,7 @@ import java.net.HttpURLConnection;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.TreeSet;
+import java.util.stream.Collectors;
 
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.FilenameUtils;
@@ -46,21 +47,21 @@ import org.slf4j.Logger;
 
 public class MavenRepositoryDeployer
 {
-    private static Logger logger = LoggerFactory.getLogger( "MavenRepositoryHelper" );
+    private static final Logger logger = LoggerFactory.getLogger( "MavenRepositoryHelper" );
 
-    private File repositoryPath;
+    private final File repositoryPath;
 
     private RepositorySystem system;
 
     private DefaultRepositorySystemSession session;
 
-    private final TreeSet<String> successfulDeploys = new TreeSet<String>();
+    private final TreeSet<String> successfulDeploys = new TreeSet<>();
 
-    private final TreeSet<String> failedDeploys = new TreeSet<String>();
+    private final TreeSet<String> failedDeploys = new TreeSet<>();
 
-    private final TreeSet<String> skippedDeploys = new TreeSet<String>();
+    private final TreeSet<String> skippedDeploys = new TreeSet<>();
     
-    private final TreeSet<String> potentialDeploys = new TreeSet<String>();
+    private final TreeSet<String> potentialDeploys = new TreeSet<>();
 
     public MavenRepositoryDeployer( File repositoryPath )
     {
@@ -76,13 +77,9 @@ public class MavenRepositoryDeployer
     
     public static Collection<File> getLeafDirectories( File repoPath ) 
     {
-        // Using commons-io, if performance or so is a problem it might be worth looking at the Java 8 streams API
-        // e.g. http://blog.jooq.org/2014/01/24/java-8-friday-goodies-the-new-new-io-apis/
-        // not yet though..
-       Collection<File> subDirectories =
-            FileUtils.listFilesAndDirs( repoPath, DirectoryFileFilter.DIRECTORY,
+       Collection<File> subDirectories = FileUtils.listFilesAndDirs( repoPath, DirectoryFileFilter.DIRECTORY,
                 VisibleDirectoryFileFilter.DIRECTORY );
-        Collection<File> leafDirectories = new ArrayList<File>();
+        Collection<File> leafDirectories = new ArrayList<>();
         for ( File subDirectory : subDirectories )
         {
             if ( isLeafVersionDirectory( subDirectory ) && subDirectory != repoPath )
@@ -101,19 +98,15 @@ public class MavenRepositoryDeployer
      */
     private static boolean isLeafVersionDirectory( File subDirectory )
     {
-        boolean isLeafVersionDirectory;
-        Collection<File> subDirectories =
-            FileUtils.listFilesAndDirs( subDirectory,
-                (IOFileFilter) VisibleDirectoryFileFilter.DIRECTORY,
-                (IOFileFilter) VisibleDirectoryFileFilter.DIRECTORY );
         // it finds at least itself so have to check for > 1
-        isLeafVersionDirectory = subDirectories.size() > 1 ? false : true; 
-        return isLeafVersionDirectory;
+        return FileUtils.listFilesAndDirs( subDirectory,
+                VisibleDirectoryFileFilter.DIRECTORY,
+                VisibleDirectoryFileFilter.DIRECTORY).size() <= 1;
     }
     
     public static Collection<File> getPomFiles( File repoPath )
     {
-        Collection<File> pomFiles = new ArrayList<File>();
+        Collection<File> pomFiles = new ArrayList<>();
         Collection<File> leafDirectories = getLeafDirectories( repoPath );
         for ( File leafDirectory : leafDirectories )
         {
@@ -125,16 +118,18 @@ public class MavenRepositoryDeployer
     }
 
 
-    public void deployToRemote( String targetUrl, String username, String password, Boolean checkTarget,
-        Boolean verifyOnly )
+    public void deployToRemote( String targetUrl, String username, String password, boolean checkTarget,
+        boolean verifyOnly )
     {
-        Collection<File> leafDirectories = getLeafDirectories( repositoryPath );
+        Collection<File> leafDirectories = getLeafDirectories( repositoryPath ).stream().limit(100).collect(Collectors.toList());
 
         for ( File leafDirectory : leafDirectories )
         {
+
+            logger.info("Handling directory {}", leafDirectory.getAbsolutePath());
             String leafAbsolutePath = leafDirectory.getAbsoluteFile().toString();
             int repoAbsolutePathLength = repositoryPath.getAbsoluteFile().toString().length();
-            String leafRepoPath = leafAbsolutePath.substring( repoAbsolutePathLength + 1, leafAbsolutePath.length() );
+            String leafRepoPath = leafAbsolutePath.substring( repoAbsolutePathLength + 1);
 
             Gav gav = GavUtil.getGavFromRepositoryPath( leafRepoPath );
 
@@ -151,12 +146,14 @@ public class MavenRepositoryDeployer
             } 
             else
             {
+                logger.info("Will deploy " + gav);
                 // only interested in files using the artifactId-version* pattern
                 // don't bother with .sha1 files
                 IOFileFilter fileFilter =
                     new AndFileFilter( new WildcardFileFilter( gav.getArtifactId() + "-" + gav.getVersion() + "*" ),
                                        new NotFileFilter( new SuffixFileFilter( "sha1" ) ) );
                 Collection<File> artifacts = FileUtils.listFiles( leafDirectory, fileFilter, null );
+                logger.info("Found files: " + artifacts);
 
                 Authentication auth = new AuthenticationBuilder().addUsername( username ).addPassword( password )
                                 .build();
@@ -184,8 +181,8 @@ public class MavenRepositoryDeployer
                     String g = gav.getGroupId();
                     String a = gav.getArtifactId();
                     String v = gav.getVersion();
-                    
-                    Artifact artifact = null;
+
+                    Artifact artifact;
                     if ( gav.getPomFilename().equals( fileName ) )
                     {
                         artifact = new DefaultArtifact( g, a, MavenConstants.POM, v );
@@ -204,21 +201,16 @@ public class MavenRepositoryDeployer
                     }
                     else if ( baseFileName.equals( fileName ) )
                     {
-                        artifact = new DefaultArtifact( g, a, extension, v );
-                    }
-                    else
-                    {
+                        artifact = new DefaultArtifact(g, a, extension, v);
+                    } else {
                         String classifier =
-                            file.getName().substring( gav.getFilenameStart().length() + 1,
-                                                      file.getName().length() - ( "." + extension ).length() );
-                        artifact = new DefaultArtifact( g, a, classifier, extension, v );
+                                file.getName().substring(gav.getFilenameStart().length() + 1,
+                                        file.getName().length() - ("." + extension).length());
+                        artifact = new DefaultArtifact(g, a, classifier, extension, v);
                     }
 
-                    if ( artifact != null )
-                    {
-                        artifact = artifact.setFile( file );
-                        deployRequest.addArtifact( artifact );
-                    }
+                    artifact = artifact.setFile(file);
+                    deployRequest.addArtifact(artifact);
                 }
 
                 try
@@ -241,7 +233,7 @@ public class MavenRepositoryDeployer
                 }
                 catch ( Exception e )
                 {
-                    logger.info( "Deployment failed with " + e.getMessage() + ", artifact might be deployed already." );
+                    logger.info( "Deployment failed with {}, artifact might be deployed already.", e.getMessage());
                     for ( Artifact artifact : deployRequest.getArtifacts() ) 
                     {
                         failedDeploys.add( artifact.toString() );
@@ -300,7 +292,7 @@ public class MavenRepositoryDeployer
         builder.append( "Sucessful Deployments:\n\n" );
         for ( String artifact : successfulDeploys )
         {
-            builder.append( artifact + "\n" );
+            builder.append(artifact).append("\n");
         }
         return builder.toString();
     }
@@ -311,7 +303,7 @@ public class MavenRepositoryDeployer
         builder.append( "Failed Deployments:\n\n" );
         for ( String artifact : failedDeploys )
         {
-            builder.append( artifact + "\n" );
+            builder.append(artifact).append("\n");
         }
 
         return builder.toString();
@@ -323,7 +315,7 @@ public class MavenRepositoryDeployer
         builder.append( "Skipped Deployments (POM already in target):\n\n" );
         for ( String artifact : skippedDeploys )
         {
-            builder.append( artifact + "\n" );
+            builder.append(artifact).append("\n");
         }
 
         return builder.toString();
@@ -335,7 +327,7 @@ public class MavenRepositoryDeployer
         builder.append( "Potential Deployments :\n\n" );
         for ( String artifact : potentialDeploys )
         {
-            builder.append( artifact + "\n" );
+            builder.append(artifact).append("\n");
         }
 
         return builder.toString();
@@ -367,13 +359,12 @@ public class MavenRepositoryDeployer
         {
             p = MavenConstants.JAR;
         }
-        Gav gav = new Gav( g, a, v, p );
-        return gav;
+        return new Gav( g, a, v, p );
     }
 
     public boolean hasFailure() 
     {
-      return failedDeploys.size() > 0;
+      return !failedDeploys.isEmpty();
     }
 
     public String getFailureMessage() 

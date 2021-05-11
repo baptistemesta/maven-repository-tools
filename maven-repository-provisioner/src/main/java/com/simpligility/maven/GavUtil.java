@@ -11,18 +11,21 @@ public class GavUtil
 
     public static Gav getGavFromRepositoryPath( String leafRepoPath )
     {
+        try {
+            int versionStartSlash = leafRepoPath.lastIndexOf(File.separator);
+            String version = leafRepoPath.substring(versionStartSlash + 1);
 
-        int versionStartSlash = leafRepoPath.lastIndexOf( File.separator );
-        String version = leafRepoPath.substring( versionStartSlash + 1, leafRepoPath.length() );
+            String gaPath = leafRepoPath.substring(0, versionStartSlash);
+            int gaStartSlash = gaPath.lastIndexOf(File.separator);
+            String artifactId = gaPath.substring(gaStartSlash + 1);
 
-        String gaPath = leafRepoPath.substring( 0, versionStartSlash );
-        int gaStartSlash = gaPath.lastIndexOf( File.separator );
-        String artifactId = gaPath.substring( gaStartSlash + 1, gaPath.length() );
+            String gPath = gaPath.substring(0, gaStartSlash);
+            String groupId = gPath.replace(File.separator, ".");
+            return new Gav(groupId, artifactId, version, null);
+        } catch (Exception e) {
+            throw new RuntimeException("Unable to retrieve coordinates of: " + leafRepoPath, e);
+        }
 
-        String gPath = gaPath.substring( 0, gaStartSlash );
-        String groupId = gPath.replace( File.separator, "." );
-
-        return new Gav( groupId, artifactId, version, null );
     }
     
 
