@@ -34,6 +34,7 @@ import com.amazonaws.services.codeartifact.model.ListPackageVersionsResult;
 import com.simpligility.maven.Gav;
 import com.simpligility.maven.GavUtil;
 import com.simpligility.maven.MavenConstants;
+import me.tongfei.progressbar.ProgressBar;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.FilenameUtils;
 import org.apache.commons.io.IOUtils;
@@ -132,8 +133,20 @@ public class MavenRepositoryDeployer
     public void deployToRemote( String targetUrl, String username, String password, boolean checkTarget,
         boolean verifyOnly )
     {
-
+        long total = 100;
         try {
+
+            total = Files.walk(repositoryPath.toPath())
+                    .map(Path::toFile)
+                    .filter(f -> f.isFile() && f.getName().endsWith(".pom")).count();
+        } catch (Exception e) {
+            logger.error("Error evaluating the total poms",e);
+        }
+
+        try (ProgressBar failed = new ProgressBar("Failed", total);
+             ProgressBar completed = new ProgressBar("Completed", total);
+             ProgressBar skipped = new ProgressBar("Skipped", total);
+             ProgressBar totalProgress = new ProgressBar("Total", total)){
             Files.walk(repositoryPath.toPath())
                     .map(Path::toFile)
                     .filter(f -> f.isFile() && f.getName().endsWith(".pom"))
@@ -152,15 +165,20 @@ public class MavenRepositoryDeployer
                         }
 
                         if (pomInTarget) {
-                            logger.info("Found POM for {} already in target. Skipping deployment.", gav);
+                            logger.debug("Found POM for {} already in target. Skipping deployment.", gav);
                             skippedDeploys.add(gav.toString());
+                            skipped.step();
+                            totalProgress.step();
                         } else {
-                            logger.info("Will deploy {}", gav);
+                            logger.debug("Will deploy {}", gav);
                             // only interested in files using the artifactId-version* pattern
                             // don't bother with .sha1 files
                             IOFileFilter fileFilter =
                                     new AndFileFilter(asList(new WildcardFileFilter(gav.getArtifactId() + "-" + gav.getVersion() + "*"),
-                                            new NotFileFilter(new SuffixFileFilter("sha1")),new NotFileFilter(new SuffixFileFilter("md5"))));
+                                            new NotFileFilter(new SuffixFileFilter("sha1")),
+                                            new NotFileFilter(new SuffixFileFilter("md5")),
+                                            new NotFileFilter(new SuffixFileFilter("sha512")),
+                                            new NotFileFilter(new SuffixFileFilter("sha256"))));
                             Collection<File> artifacts = FileUtils.listFiles(leafDirectory, fileFilter, null);
 
                             Authentication auth = new AuthenticationBuilder().addUsername(username).addPassword(password)
@@ -240,8 +258,17 @@ public class MavenRepositoryDeployer
                                     artifactMap.entrySet().forEach((artifactEntry -> {
                                         Optional<AssetSummary> artifactsAsset = uploadedAssets.stream().filter(asset -> asset.getName().equals(artifactEntry.getKey())).findFirst();
                                         if (artifactsAsset.isPresent()) {
-                                            success(artifactEntry.getValue().toString() + ": MD5 check:" + checkMD5(md5Map, artifactEntry, artifactsAsset.get()));
+                                            String checkMD5 = checkMD5(md5Map, artifactEntry, artifactsAsset.get());
+                                            if (checkMD5.equals("OK")) {
+                                                failed.step();totalProgress.step();
+                                                failed.setExtraMessage("Last failure due to MD5 verification");
+                                            }else{
+                                                completed.step();totalProgress.step();
+                                            }
+                                            success(artifactEntry.getValue().toString() + ": MD5 check:" + checkMD5);
                                         } else {
+                                            failed.step();totalProgress.step();
+                                            failed.setExtraMessage("Last failure due to: not found after deploy");
                                             failed(artifactEntry.getValue().toString() + ": Was not found after deployment");
                                         }
                                     }));
@@ -249,6 +276,7 @@ public class MavenRepositoryDeployer
                             } catch (Exception e) {
                                 logger.debug("Deployment failed with {}, artifact might be deployed already.", e.getMessage());
                                 for (Artifact artifact : deployRequest.getArtifacts()) {
+                                    failed.step();totalProgress.step();
                                     failed(artifact.toString());
                                 }
                             }
@@ -260,12 +288,12 @@ public class MavenRepositoryDeployer
     }
 
     private void failed(String log) {
-        logger.info("FAILED: {}", log);
+        logger.debug("FAILED: {}", log);
         failedDeploys.add(log);
     }
 
     private void success(String log) {
-        logger.info("SUCCESS:{}", log);
+        logger.debug("SUCCESS:{}", log);
         successfulDeploys.add(log);
     }
 

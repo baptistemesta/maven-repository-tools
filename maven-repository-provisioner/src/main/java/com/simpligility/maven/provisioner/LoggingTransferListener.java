@@ -36,7 +36,7 @@ public class LoggingTransferListener
     {
         String message = event.getRequestType() == TransferEvent.RequestType.PUT ? "Uploading" : "Downloading";
 
-        logger.info( message + ": " + event.getResource().getRepositoryUrl() + event.getResource().getResourceName() );
+        logger.debug( message + ": " + event.getResource().getRepositoryUrl() + event.getResource().getResourceName() );
     }
 
     @Override
