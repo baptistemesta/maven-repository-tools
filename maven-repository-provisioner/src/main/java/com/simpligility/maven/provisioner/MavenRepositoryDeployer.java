@@ -4,20 +4,33 @@
  */
 package com.simpligility.maven.provisioner;
 
+import static java.util.Arrays.asList;
+
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
 import java.net.HttpURLConnection;
-import java.util.ArrayList;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Collection;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
 
+import com.amazonaws.auth.EnvironmentVariableCredentialsProvider;
+import com.amazonaws.services.codeartifact.AWSCodeArtifact;
+import com.amazonaws.services.codeartifact.AWSCodeArtifactClientBuilder;
+import com.amazonaws.services.codeartifact.model.AssociateExternalConnectionRequest;
+import com.amazonaws.services.codeartifact.model.ListPackageVersionAssetsRequest;
+import com.amazonaws.services.codeartifact.model.ListPackageVersionAssetsResult;
+import com.amazonaws.services.codeartifact.model.ListPackageVersionsRequest;
+import com.amazonaws.services.codeartifact.model.ListPackageVersionsResult;
+import com.simpligility.maven.Gav;
+import com.simpligility.maven.GavUtil;
+import com.simpligility.maven.MavenConstants;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.FilenameUtils;
 import org.apache.commons.io.filefilter.AndFileFilter;
-import org.apache.commons.io.filefilter.DirectoryFileFilter;
 import org.apache.commons.io.filefilter.IOFileFilter;
 import org.apache.commons.io.filefilter.NotFileFilter;
 import org.apache.commons.io.filefilter.SuffixFileFilter;
@@ -34,16 +47,12 @@ import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.artifact.Artifact;
 import org.eclipse.aether.artifact.DefaultArtifact;
 import org.eclipse.aether.deployment.DeployRequest;
+import org.eclipse.aether.deployment.DeployResult;
 import org.eclipse.aether.repository.Authentication;
 import org.eclipse.aether.repository.RemoteRepository;
 import org.eclipse.aether.util.repository.AuthenticationBuilder;
-import org.slf4j.LoggerFactory;
-
-import com.simpligility.maven.Gav;
-import com.simpligility.maven.GavUtil;
-import com.simpligility.maven.MavenConstants;
-
 import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class MavenRepositoryDeployer
 {
@@ -62,6 +71,11 @@ public class MavenRepositoryDeployer
     private final TreeSet<String> skippedDeploys = new TreeSet<>();
     
     private final TreeSet<String> potentialDeploys = new TreeSet<>();
+    private AWSCodeArtifact aws;
+    public static final String CODE_ARTIFACT_DOMAIN = System.getenv("CODE_ARTIFACT_DOMAIN");
+    public static final String CODE_ARTIFACT_REPO = System.getenv("CODE_ARTIFACT_REPO");
+    public static final String AWS_REGION = System.getenv("AWS_REGION");
+    public static final String AWS_ACCESS_KEY_ID = System.getenv("AWS_ACCESS_KEY_ID");
 
     public MavenRepositoryDeployer( File repositoryPath )
     {
@@ -73,23 +87,14 @@ public class MavenRepositoryDeployer
     {
         system = RepositoryHandler.getRepositorySystem();
         session = RepositoryHandler.getRepositorySystemSession( system, repositoryPath );
+        logger.info("AWS_REGION={}", AWS_REGION);
+        logger.info("AWS_ACCESS_KEY_ID={}", AWS_ACCESS_KEY_ID);
+        aws = AWSCodeArtifactClientBuilder.standard()
+                .withCredentials(new EnvironmentVariableCredentialsProvider())
+                .withRegion(AWS_REGION).build();
+
     }
-    
-    public static Collection<File> getLeafDirectories( File repoPath ) 
-    {
-       Collection<File> subDirectories = FileUtils.listFilesAndDirs( repoPath, DirectoryFileFilter.DIRECTORY,
-                VisibleDirectoryFileFilter.DIRECTORY );
-        Collection<File> leafDirectories = new ArrayList<>();
-        for ( File subDirectory : subDirectories )
-        {
-            if ( isLeafVersionDirectory( subDirectory ) && subDirectory != repoPath )
-            {
-                leafDirectories.add( subDirectory );
-            }
-        }
-        return leafDirectories;
-    }
-    
+
     /**
      * Determine if it is a leaf directory with artifacts in it. Criteria used is that there is no subdirectory.
      * 
@@ -106,140 +111,130 @@ public class MavenRepositoryDeployer
     
     public static Collection<File> getPomFiles( File repoPath )
     {
-        Collection<File> pomFiles = new ArrayList<>();
-        Collection<File> leafDirectories = getLeafDirectories( repoPath );
-        for ( File leafDirectory : leafDirectories )
-        {
-            IOFileFilter fileFilter = new AndFileFilter( new WildcardFileFilter( "*.pom" ),
-                                               new NotFileFilter( new SuffixFileFilter( "sha1" ) ) );
-            pomFiles.addAll( FileUtils.listFiles( leafDirectory, fileFilter, null ) );
+        try {
+            return Files.walk(repoPath.toPath())
+                    .map(Path::toFile)
+                    .filter(f -> f.isFile() && f.getName().endsWith(".pom"))
+                    .collect(Collectors.toList());
+        } catch (IOException e) {
+            throw new RuntimeException(e);
         }
-        return pomFiles;
     }
 
 
     public void deployToRemote( String targetUrl, String username, String password, boolean checkTarget,
         boolean verifyOnly )
     {
-        Collection<File> leafDirectories = getLeafDirectories( repositoryPath ).stream().limit(100).collect(Collectors.toList());
 
-        for ( File leafDirectory : leafDirectories )
-        {
+        try {
+            Files.walk(repositoryPath.toPath())
+                    .map(Path::toFile)
+                    .filter(f -> f.isFile() && f.getName().endsWith(".pom"))
+                    .map(File::getParentFile)
+                    .limit(3)
+                    .forEach(leafDirectory -> {
+                        logger.info("Handling directory {}", leafDirectory.getAbsolutePath());
+                        String leafAbsolutePath = leafDirectory.getAbsoluteFile().toString();
+                        int repoAbsolutePathLength = repositoryPath.getAbsoluteFile().toString().length();
+                        String leafRepoPath = leafAbsolutePath.substring(repoAbsolutePathLength + 1);
 
-            logger.info("Handling directory {}", leafDirectory.getAbsolutePath());
-            String leafAbsolutePath = leafDirectory.getAbsoluteFile().toString();
-            int repoAbsolutePathLength = repositoryPath.getAbsoluteFile().toString().length();
-            String leafRepoPath = leafAbsolutePath.substring( repoAbsolutePathLength + 1);
+                        Gav gav = GavUtil.getGavFromRepositoryPath(leafRepoPath);
 
-            Gav gav = GavUtil.getGavFromRepositoryPath( leafRepoPath );
+                        boolean pomInTarget = false;
+                        if (checkTarget) {
+                            pomInTarget = checkIfPomInTarget(targetUrl, username, password, gav);
+                        }
 
-            boolean pomInTarget = false;
-            if ( checkTarget ) 
-            {
-                pomInTarget = checkIfPomInTarget( targetUrl, username, password, gav );
-            }
-            
-            if ( pomInTarget ) 
-            {
-                logger.info( "Found POM for " + gav + " already in target. Skipping deployment." );
-                skippedDeploys.add( gav.toString() );
-            } 
-            else
-            {
-                logger.info("Will deploy " + gav);
-                // only interested in files using the artifactId-version* pattern
-                // don't bother with .sha1 files
-                IOFileFilter fileFilter =
-                    new AndFileFilter( new WildcardFileFilter( gav.getArtifactId() + "-" + gav.getVersion() + "*" ),
-                                       new NotFileFilter( new SuffixFileFilter( "sha1" ) ) );
-                Collection<File> artifacts = FileUtils.listFiles( leafDirectory, fileFilter, null );
-                logger.info("Found files: " + artifacts);
+                        if (pomInTarget) {
+                            logger.info("Found POM for {} already in target. Skipping deployment.", gav);
+                            skippedDeploys.add(gav.toString());
+                        } else {
+                            logger.info("Will deploy {}", gav);
+                            // only interested in files using the artifactId-version* pattern
+                            // don't bother with .sha1 files
+                            IOFileFilter fileFilter =
+                                    new AndFileFilter(asList(new WildcardFileFilter(gav.getArtifactId() + "-" + gav.getVersion() + "*"),
+                                            new NotFileFilter(new SuffixFileFilter("sha1")),new NotFileFilter(new SuffixFileFilter("md5"))));
+                            Collection<File> artifacts = FileUtils.listFiles(leafDirectory, fileFilter, null);
 
-                Authentication auth = new AuthenticationBuilder().addUsername( username ).addPassword( password )
-                                .build();
+                            Authentication auth = new AuthenticationBuilder().addUsername(username).addPassword(password)
+                                    .build();
 
-                RemoteRepository distRepo = new RemoteRepository.Builder( "repositoryIdentifier", "default", targetUrl )
-                        .setProxy( ProxyHelper.getProxy( targetUrl ) )
-                        .setAuthentication( auth ).build();
+                            RemoteRepository distRepo = new RemoteRepository.Builder("repositoryIdentifier", "default", targetUrl)
+                                    .setProxy(ProxyHelper.getProxy(targetUrl))
+                                    .setAuthentication(auth).build();
 
-                DeployRequest deployRequest = new DeployRequest();
-                deployRequest.setRepository( distRepo );
-                for ( File file : artifacts )
-                {
-                    String extension;
-                    if ( file.getName().endsWith( "tar.gz" ) )
-                    {
-                        extension = "tar.gz";
-                    }
-                    else
-                    {
-                        extension = FilenameUtils.getExtension( file.getName() );
-                    }
+                            DeployRequest deployRequest = new DeployRequest();
+                            deployRequest.setRepository(distRepo);
+                            for (File file : artifacts) {
+                                String extension;
+                                if (file.getName().endsWith("tar.gz")) {
+                                    extension = "tar.gz";
+                                } else {
+                                    extension = FilenameUtils.getExtension(file.getName());
+                                }
 
-                    String baseFileName = gav.getFilenameStart() + "." + extension;
-                    String fileName = file.getName();
-                    String g = gav.getGroupId();
-                    String a = gav.getArtifactId();
-                    String v = gav.getVersion();
+                                String baseFileName = gav.getFilenameStart() + "." + extension;
+                                String fileName = file.getName();
+                                String g = gav.getGroupId();
+                                String a = gav.getArtifactId();
+                                String v = gav.getVersion();
 
-                    Artifact artifact;
-                    if ( gav.getPomFilename().equals( fileName ) )
-                    {
-                        artifact = new DefaultArtifact( g, a, MavenConstants.POM, v );
-                    }
-                    else if ( gav.getJarFilename().equals( fileName ) )
-                    {
-                        artifact = new DefaultArtifact( g, a, MavenConstants.JAR, v );
-                    }
-                    else if ( gav.getSourceFilename().equals( fileName ) )
-                    {
-                        artifact = new DefaultArtifact( g, a, MavenConstants.SOURCES, MavenConstants.JAR, v );
-                    }
-                    else if ( gav.getJavadocFilename().equals( fileName ) )
-                    {
-                        artifact = new DefaultArtifact( g, a, MavenConstants.JAVADOC, MavenConstants.JAR, v );
-                    }
-                    else if ( baseFileName.equals( fileName ) )
-                    {
-                        artifact = new DefaultArtifact(g, a, extension, v);
-                    } else {
-                        String classifier =
-                                file.getName().substring(gav.getFilenameStart().length() + 1,
-                                        file.getName().length() - ("." + extension).length());
-                        artifact = new DefaultArtifact(g, a, classifier, extension, v);
-                    }
+                                Artifact artifact;
+                                if (gav.getPomFilename().equals(fileName)) {
+                                    artifact = new DefaultArtifact(g, a, MavenConstants.POM, v);
+                                } else if (gav.getJarFilename().equals(fileName)) {
+                                    artifact = new DefaultArtifact(g, a, MavenConstants.JAR, v);
+                                } else if (gav.getSourceFilename().equals(fileName)) {
+                                    artifact = new DefaultArtifact(g, a, MavenConstants.SOURCES, MavenConstants.JAR, v);
+                                } else if (gav.getJavadocFilename().equals(fileName)) {
+                                    artifact = new DefaultArtifact(g, a, MavenConstants.JAVADOC, MavenConstants.JAR, v);
+                                } else if (baseFileName.equals(fileName)) {
+                                    artifact = new DefaultArtifact(g, a, extension, v);
+                                } else {
+                                    String classifier =
+                                            file.getName().substring(gav.getFilenameStart().length() + 1,
+                                                    file.getName().length() - ("." + extension).length());
+                                    artifact = new DefaultArtifact(g, a, classifier, extension, v);
+                                }
 
-                    artifact = artifact.setFile(file);
-                    deployRequest.addArtifact(artifact);
-                }
+                                artifact = artifact.setFile(file);
+                                deployRequest.addArtifact(artifact);
+                            }
 
-                try
-                {
-                    if ( verifyOnly )
-                    {
-                      for ( Artifact artifact : deployRequest.getArtifacts() )
-                      {
-                          potentialDeploys.add( artifact.toString() );
-                      }
-                    }
-                    else
-                    {
-                      system.deploy( session, deployRequest );
-                      for ( Artifact artifact : deployRequest.getArtifacts() )
-                      {
-                          successfulDeploys.add( artifact.toString() );
-                      }
-                    }
-                }
-                catch ( Exception e )
-                {
-                    logger.info( "Deployment failed with {}, artifact might be deployed already.", e.getMessage());
-                    for ( Artifact artifact : deployRequest.getArtifacts() ) 
-                    {
-                        failedDeploys.add( artifact.toString() );
-                    }
-                }
-            }
+                            try {
+                                if (verifyOnly) {
+                                    for (Artifact artifact : deployRequest.getArtifacts()) {
+                                        potentialDeploys.add(artifact.toString());
+                                    }
+                                } else {
+                                    DeployResult deploy = system.deploy(session, deployRequest);
+
+                                    ListPackageVersionAssetsResult uploadedAssets = aws.listPackageVersionAssets(
+                                            new ListPackageVersionAssetsRequest()
+                                                    .withPackageVersion(gav.getVersion())
+                                                    .withNamespace(gav.getGroupId()).withPackage(gav.getArtifactId()).withFormat("maven")
+                                                    .withDomain(CODE_ARTIFACT_DOMAIN).withRepository(CODE_ARTIFACT_REPO)
+                                    );
+                                    uploadedAssets.getAssets().forEach(asset->{
+                                        String md5 = asset.getHashes().get("MD5");
+                                        failedDeploys.add(asset.getName() + " -> MD5=" + md5);
+                                    });
+
+                                    for (Artifact artifact : deployRequest.getArtifacts()) {
+                                        successfulDeploys.add(artifact.toString());
+                                    }
+                                }
+                            } catch (Exception e) {
+                                logger.info("Deployment failed with {}, artifact might be deployed already.", e.getMessage());
+                                for (Artifact artifact : deployRequest.getArtifacts()) {
+                                    failedDeploys.add(artifact.toString());
+                                }
+                            }
+                        }
+                    });
+        } catch (IOException e) {
+            throw new RuntimeException(e);
         }
     }
 
