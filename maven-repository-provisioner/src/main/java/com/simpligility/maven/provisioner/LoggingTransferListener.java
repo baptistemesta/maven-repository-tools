@@ -27,10 +27,6 @@ public class LoggingTransferListener
 {
     private static Logger logger = LoggerFactory.getLogger( "LoggingTransferListener" );
 
-    private Map<TransferResource, Long> downloads = new ConcurrentHashMap<TransferResource, Long>();
-
-    private int lastLength;
-
     public LoggingTransferListener()
     {
     }
@@ -46,8 +42,6 @@ public class LoggingTransferListener
     @Override
     public void transferSucceeded( TransferEvent event )
     {
-        transferCompleted( event );
-
         TransferResource resource = event.getResource();
         long contentLength = event.getTransferredBytes();
         if ( contentLength >= 0 )
@@ -65,7 +59,7 @@ public class LoggingTransferListener
                 throughput = " at " + format.format( kbPerSec ) + " KB/sec";
             }
 
-            logger.info( type + ": " + resource.getRepositoryUrl() + resource.getResourceName() + " (" + len
+            logger.debug( type + ": " + resource.getRepositoryUrl() + resource.getResourceName() + " (" + len
                 + throughput + ")" );
         }
     }
@@ -73,22 +67,16 @@ public class LoggingTransferListener
     @Override
     public void transferFailed( TransferEvent event )
     {
-        transferCompleted( event );
-
         if ( !( event.getException() instanceof MetadataNotFoundException ) )
         {
-            logger.info( event.getException().getMessage() );
+            logger.debug( event.getException().getMessage() );
         }
     }
 
-    private void transferCompleted( TransferEvent event )
-    {
-        downloads.remove( event.getResource() );
-    }
 
     public void transferCorrupted( TransferEvent event )
     {
-        logger.info( event.getException().getMessage() );
+        logger.debug( event.getException().getMessage() );
     }
 
     protected long toKB( long bytes )

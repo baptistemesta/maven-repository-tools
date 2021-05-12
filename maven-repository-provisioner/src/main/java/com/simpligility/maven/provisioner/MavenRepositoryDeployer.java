@@ -11,15 +11,21 @@ import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
 import java.net.HttpURLConnection;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
 
 import com.amazonaws.auth.EnvironmentVariableCredentialsProvider;
 import com.amazonaws.services.codeartifact.AWSCodeArtifact;
 import com.amazonaws.services.codeartifact.AWSCodeArtifactClientBuilder;
+import com.amazonaws.services.codeartifact.model.AssetSummary;
 import com.amazonaws.services.codeartifact.model.AssociateExternalConnectionRequest;
 import com.amazonaws.services.codeartifact.model.ListPackageVersionAssetsRequest;
 import com.amazonaws.services.codeartifact.model.ListPackageVersionAssetsResult;
@@ -30,6 +36,7 @@ import com.simpligility.maven.GavUtil;
 import com.simpligility.maven.MavenConstants;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.FilenameUtils;
+import org.apache.commons.io.IOUtils;
 import org.apache.commons.io.filefilter.AndFileFilter;
 import org.apache.commons.io.filefilter.IOFileFilter;
 import org.apache.commons.io.filefilter.NotFileFilter;
@@ -131,9 +138,8 @@ public class MavenRepositoryDeployer
                     .map(Path::toFile)
                     .filter(f -> f.isFile() && f.getName().endsWith(".pom"))
                     .map(File::getParentFile)
-                    .limit(3)
                     .forEach(leafDirectory -> {
-                        logger.info("Handling directory {}", leafDirectory.getAbsolutePath());
+                        logger.debug("Handling directory {}", leafDirectory.getAbsolutePath());
                         String leafAbsolutePath = leafDirectory.getAbsoluteFile().toString();
                         int repoAbsolutePathLength = repositoryPath.getAbsoluteFile().toString().length();
                         String leafRepoPath = leafAbsolutePath.substring(repoAbsolutePathLength + 1);
@@ -166,6 +172,8 @@ public class MavenRepositoryDeployer
 
                             DeployRequest deployRequest = new DeployRequest();
                             deployRequest.setRepository(distRepo);
+                            Map<String, Artifact> artifactMap = new HashMap<>();
+                            Map<String, String> md5Map = new HashMap<>();
                             for (File file : artifacts) {
                                 String extension;
                                 if (file.getName().endsWith("tar.gz")) {
@@ -199,8 +207,20 @@ public class MavenRepositoryDeployer
                                 }
 
                                 artifact = artifact.setFile(file);
+                                artifactMap.put(file.getName(), artifact);
+                                File md5File = new File(leafDirectory, file.getName() + ".md5");
+                                if (md5File.exists()) {
+                                    try {
+                                        md5Map.put(file.getName(), FileUtils.readFileToString(md5File, StandardCharsets.UTF_8));
+                                    } catch (IOException e) {
+                                        md5Map.put(file.getName(), "ERROR while reading");
+                                    }
+                                } else {
+                                    md5Map.put(file.getName(), "Not Found");
+                                }
                                 deployRequest.addArtifact(artifact);
                             }
+
 
                             try {
                                 if (verifyOnly) {
@@ -210,25 +230,26 @@ public class MavenRepositoryDeployer
                                 } else {
                                     DeployResult deploy = system.deploy(session, deployRequest);
 
-                                    ListPackageVersionAssetsResult uploadedAssets = aws.listPackageVersionAssets(
+                                    List<AssetSummary> uploadedAssets = aws.listPackageVersionAssets(
                                             new ListPackageVersionAssetsRequest()
                                                     .withPackageVersion(gav.getVersion())
                                                     .withNamespace(gav.getGroupId()).withPackage(gav.getArtifactId()).withFormat("maven")
                                                     .withDomain(CODE_ARTIFACT_DOMAIN).withRepository(CODE_ARTIFACT_REPO)
-                                    );
-                                    uploadedAssets.getAssets().forEach(asset->{
-                                        String md5 = asset.getHashes().get("MD5");
-                                        failedDeploys.add(asset.getName() + " -> MD5=" + md5);
-                                    });
+                                    ).getAssets();
 
-                                    for (Artifact artifact : deployRequest.getArtifacts()) {
-                                        successfulDeploys.add(artifact.toString());
-                                    }
+                                    artifactMap.entrySet().forEach((artifactEntry -> {
+                                        Optional<AssetSummary> artifactsAsset = uploadedAssets.stream().filter(asset -> asset.getName().equals(artifactEntry.getKey())).findFirst();
+                                        if (artifactsAsset.isPresent()) {
+                                            success(artifactEntry.getValue().toString() + ": MD5 check:" + checkMD5(md5Map, artifactEntry, artifactsAsset.get()));
+                                        } else {
+                                            failed(artifactEntry.getValue().toString() + ": Was not found after deployment");
+                                        }
+                                    }));
                                 }
                             } catch (Exception e) {
-                                logger.info("Deployment failed with {}, artifact might be deployed already.", e.getMessage());
+                                logger.debug("Deployment failed with {}, artifact might be deployed already.", e.getMessage());
                                 for (Artifact artifact : deployRequest.getArtifacts()) {
-                                    failedDeploys.add(artifact.toString());
+                                    failed(artifact.toString());
                                 }
                             }
                         }
@@ -238,25 +259,40 @@ public class MavenRepositoryDeployer
         }
     }
 
+    private void failed(String log) {
+        logger.info("FAILED: {}", log);
+        failedDeploys.add(log);
+    }
+
+    private void success(String log) {
+        logger.info("SUCCESS:{}", log);
+        successfulDeploys.add(log);
+    }
+
+    private String checkMD5(Map<String, String> md5Map, Map.Entry<String, Artifact> artifactEntry, AssetSummary asset) {
+        String expected = md5Map.get(artifactEntry.getKey());
+        String actual = asset.getHashes().get("MD5");
+        return expected.equals(actual) ? "OK" : ("BAD MD5, expected <" + expected + "> but was <" + actual + ">");
+    }
+
     /**
      * Check if POM file for provided gav can be found in target. Just does
      * a HTTP get of the header and verifies http status OK 200.
+     *
      * @param targetUrl url of the target repository
-     * @param gav group artifact version string
+     * @param gav       group artifact version string
      * @return {@code true} if the pom.xml already exists in the target repository
      */
-    private boolean checkIfPomInTarget( String targetUrl, String username, String password, Gav gav )
-    {
+    private boolean checkIfPomInTarget(String targetUrl, String username, String password, Gav gav) {
         boolean alreadyInTarget = false;
-        
+
         String artifactUrl = targetUrl + gav.getRepositoryURLPath() + gav.getPomFilename();
-        logger.debug( "Headers for {}", artifactUrl );
+        logger.debug("Headers for {}", artifactUrl);
 
-        HttpHead httphead = new HttpHead( artifactUrl );
+        HttpHead httphead = new HttpHead(artifactUrl);
 
-        if ( !StringUtils.isEmpty( username ) && ! StringUtils.isEmpty( password ) )
-        {
-          String encoding = java.util.Base64.getEncoder().encodeToString( ( username + ":" + password ).getBytes() );
+        if (!StringUtils.isEmpty(username) && !StringUtils.isEmpty(password)) {
+            String encoding = java.util.Base64.getEncoder().encodeToString((username + ":" + password).getBytes());
           httphead.setHeader( "Authorization", "Basic " + encoding );
         }
 
