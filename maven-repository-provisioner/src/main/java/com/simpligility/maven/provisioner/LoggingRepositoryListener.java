@@ -30,12 +30,12 @@ public class LoggingRepositoryListener
 
     public void artifactDeployed( RepositoryEvent event )
     {
-        logger.debug( "Deployed " + event.getArtifact() + " to " + event.getRepository() );
+        logger.info( "Deployed " + event.getArtifact() + " to " + event.getRepository() );
     }
 
     public void artifactDeploying( RepositoryEvent event )
     {
-        logger.debug( "Deploying " + event.getArtifact() + " to " + event.getRepository() );
+        logger.info( "Deploying " + event.getArtifact() + " to " + event.getRepository() );
     }
 
     public void artifactDescriptorInvalid( RepositoryEvent event )
@@ -51,7 +51,7 @@ public class LoggingRepositoryListener
 
     public void artifactInstalled( RepositoryEvent event )
     {
-        logger.debug( "Installed " + event.getArtifact() + " to " + event.getFile() );
+        logger.info( "Installed " + event.getArtifact() + " to " + event.getFile() );
     }
 
     public void artifactInstalling( RepositoryEvent event )

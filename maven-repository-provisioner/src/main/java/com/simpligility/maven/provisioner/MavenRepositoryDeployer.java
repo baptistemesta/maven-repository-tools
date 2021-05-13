@@ -21,6 +21,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import com.amazonaws.auth.EnvironmentVariableCredentialsProvider;
 import com.amazonaws.services.codeartifact.AWSCodeArtifact;
@@ -134,23 +135,25 @@ public class MavenRepositoryDeployer
         boolean verifyOnly )
     {
         long total = 100;
-        try {
+        try (Stream<Path> paths = Files.walk(repositoryPath.toPath())) {
 
-            total = Files.walk(repositoryPath.toPath())
+            total = paths
                     .map(Path::toFile)
                     .filter(f -> f.isFile() && f.getName().endsWith(".pom")).count();
         } catch (Exception e) {
-            logger.error("Error evaluating the total poms",e);
+            logger.error("Error evaluating the total poms", e);
         }
 
         try (ProgressBar failed = new ProgressBar("Failed", total);
              ProgressBar completed = new ProgressBar("Completed", total);
              ProgressBar skipped = new ProgressBar("Skipped", total);
-             ProgressBar totalProgress = new ProgressBar("Total", total)){
-            Files.walk(repositoryPath.toPath())
-                    .map(Path::toFile)
+             ProgressBar totalProgress = new ProgressBar("Total", total);
+             Stream<Path> paths = Files.walk(repositoryPath.toPath())) {
+
+            paths.map(Path::toFile)
                     .filter(f -> f.isFile() && f.getName().endsWith(".pom"))
                     .map(File::getParentFile)
+                    .parallel()
                     .forEach(leafDirectory -> {
                         logger.debug("Handling directory {}", leafDirectory.getAbsolutePath());
                         String leafAbsolutePath = leafDirectory.getAbsoluteFile().toString();
@@ -165,12 +168,12 @@ public class MavenRepositoryDeployer
                         }
 
                         if (pomInTarget) {
-                            logger.debug("Found POM for {} already in target. Skipping deployment.", gav);
+                            logger.info("Found POM for {} already in target. Skipping deployment.", gav);
                             skippedDeploys.add(gav.toString());
                             skipped.step();
                             totalProgress.step();
                         } else {
-                            logger.debug("Will deploy {}", gav);
+                            logger.info("Will deploy {}", gav);
                             // only interested in files using the artifactId-version* pattern
                             // don't bother with .sha1 files
                             IOFileFilter fileFilter =
@@ -260,15 +263,22 @@ public class MavenRepositoryDeployer
                                         if (artifactsAsset.isPresent()) {
                                             String checkMD5 = checkMD5(md5Map, artifactEntry, artifactsAsset.get());
                                             if (checkMD5.equals("OK")) {
-                                                failed.step();totalProgress.step();
-                                                failed.setExtraMessage("Last failure due to MD5 verification");
-                                            }else{
-                                                completed.step();totalProgress.step();
+                                                completed.step();
+                                                completed.setExtraMessage(artifactEntry.getValue().toString());
+                                                totalProgress.step();
+                                                totalProgress.setExtraMessage(artifactEntry.getValue().toString());
+                                            } else {
+                                                failed.step();
+                                                totalProgress.step();
+                                                totalProgress.setExtraMessage(artifactEntry.getValue().toString());
+                                                failed.setExtraMessage(artifactEntry.getValue().toString() + " => Last failure due to MD5 verification: " + checkMD5);
                                             }
                                             success(artifactEntry.getValue().toString() + ": MD5 check:" + checkMD5);
                                         } else {
-                                            failed.step();totalProgress.step();
-                                            failed.setExtraMessage("Last failure due to: not found after deploy");
+                                            failed.step();
+                                            totalProgress.step();
+                                            totalProgress.setExtraMessage(artifactEntry.getValue().toString());
+                                            failed.setExtraMessage(artifactEntry.getValue().toString() + " => Last failure due to: not found after deploy");
                                             failed(artifactEntry.getValue().toString() + ": Was not found after deployment");
                                         }
                                     }));
@@ -276,7 +286,10 @@ public class MavenRepositoryDeployer
                             } catch (Exception e) {
                                 logger.debug("Deployment failed with {}, artifact might be deployed already.", e.getMessage());
                                 for (Artifact artifact : deployRequest.getArtifacts()) {
-                                    failed.step();totalProgress.step();
+                                    failed.step();
+                                    failed.setExtraMessage(artifact.toString() + " => " + e.getMessage());
+                                    totalProgress.step();
+                                    totalProgress.setExtraMessage(artifact.toString());
                                     failed(artifact.toString());
                                 }
                             }
