@@ -19,6 +19,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -27,24 +28,20 @@ import com.amazonaws.auth.EnvironmentVariableCredentialsProvider;
 import com.amazonaws.services.codeartifact.AWSCodeArtifact;
 import com.amazonaws.services.codeartifact.AWSCodeArtifactClientBuilder;
 import com.amazonaws.services.codeartifact.model.AssetSummary;
-import com.amazonaws.services.codeartifact.model.AssociateExternalConnectionRequest;
 import com.amazonaws.services.codeartifact.model.ListPackageVersionAssetsRequest;
-import com.amazonaws.services.codeartifact.model.ListPackageVersionAssetsResult;
-import com.amazonaws.services.codeartifact.model.ListPackageVersionsRequest;
-import com.amazonaws.services.codeartifact.model.ListPackageVersionsResult;
 import com.simpligility.maven.Gav;
 import com.simpligility.maven.GavUtil;
 import com.simpligility.maven.MavenConstants;
 import me.tongfei.progressbar.ProgressBar;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.FilenameUtils;
-import org.apache.commons.io.IOUtils;
 import org.apache.commons.io.filefilter.AndFileFilter;
 import org.apache.commons.io.filefilter.IOFileFilter;
 import org.apache.commons.io.filefilter.NotFileFilter;
 import org.apache.commons.io.filefilter.SuffixFileFilter;
 import org.apache.commons.io.filefilter.WildcardFileFilter;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.methods.HttpHead;
 import org.apache.http.impl.client.CloseableHttpClient;
@@ -144,9 +141,9 @@ public class MavenRepositoryDeployer
             logger.error("Error evaluating the total poms", e);
         }
 
-        try (ProgressBar failed = new ProgressBar("Failed", total);
+        try (ProgressBar failed = new ProgressBar("Failed", -1);
              ProgressBar completed = new ProgressBar("Completed", total);
-             ProgressBar skipped = new ProgressBar("Skipped", total);
+             ProgressBar skipped = new ProgressBar("Skipped", -1);
              ProgressBar totalProgress = new ProgressBar("Total", total);
              Stream<Path> paths = Files.walk(repositoryPath.toPath())) {
 
@@ -191,56 +188,9 @@ public class MavenRepositoryDeployer
                                     .setProxy(ProxyHelper.getProxy(targetUrl))
                                     .setAuthentication(auth).build();
 
-                            DeployRequest deployRequest = new DeployRequest();
-                            deployRequest.setRepository(distRepo);
                             Map<String, Artifact> artifactMap = new HashMap<>();
                             Map<String, String> md5Map = new HashMap<>();
-                            for (File file : artifacts) {
-                                String extension;
-                                if (file.getName().endsWith("tar.gz")) {
-                                    extension = "tar.gz";
-                                } else {
-                                    extension = FilenameUtils.getExtension(file.getName());
-                                }
-
-                                String baseFileName = gav.getFilenameStart() + "." + extension;
-                                String fileName = file.getName();
-                                String g = gav.getGroupId();
-                                String a = gav.getArtifactId();
-                                String v = gav.getVersion();
-
-                                Artifact artifact;
-                                if (gav.getPomFilename().equals(fileName)) {
-                                    artifact = new DefaultArtifact(g, a, MavenConstants.POM, v);
-                                } else if (gav.getJarFilename().equals(fileName)) {
-                                    artifact = new DefaultArtifact(g, a, MavenConstants.JAR, v);
-                                } else if (gav.getSourceFilename().equals(fileName)) {
-                                    artifact = new DefaultArtifact(g, a, MavenConstants.SOURCES, MavenConstants.JAR, v);
-                                } else if (gav.getJavadocFilename().equals(fileName)) {
-                                    artifact = new DefaultArtifact(g, a, MavenConstants.JAVADOC, MavenConstants.JAR, v);
-                                } else if (baseFileName.equals(fileName)) {
-                                    artifact = new DefaultArtifact(g, a, extension, v);
-                                } else {
-                                    String classifier =
-                                            file.getName().substring(gav.getFilenameStart().length() + 1,
-                                                    file.getName().length() - ("." + extension).length());
-                                    artifact = new DefaultArtifact(g, a, classifier, extension, v);
-                                }
-
-                                artifact = artifact.setFile(file);
-                                artifactMap.put(file.getName(), artifact);
-                                File md5File = new File(leafDirectory, file.getName() + ".md5");
-                                if (md5File.exists()) {
-                                    try {
-                                        md5Map.put(file.getName(), FileUtils.readFileToString(md5File, StandardCharsets.UTF_8));
-                                    } catch (IOException e) {
-                                        md5Map.put(file.getName(), "ERROR while reading");
-                                    }
-                                } else {
-                                    md5Map.put(file.getName(), "Not Found");
-                                }
-                                deployRequest.addArtifact(artifact);
-                            }
+                            DeployRequest deployRequest = createDeployRequest(leafDirectory, gav, artifacts, distRepo, artifactMap, md5Map);
 
 
                             try {
@@ -258,46 +208,111 @@ public class MavenRepositoryDeployer
                                                     .withDomain(CODE_ARTIFACT_DOMAIN).withRepository(CODE_ARTIFACT_REPO)
                                     ).getAssets();
 
-                                    artifactMap.entrySet().forEach((artifactEntry -> {
-                                        Optional<AssetSummary> artifactsAsset = uploadedAssets.stream().filter(asset -> asset.getName().equals(artifactEntry.getKey())).findFirst();
-                                        if (artifactsAsset.isPresent()) {
-                                            String checkMD5 = checkMD5(md5Map, artifactEntry, artifactsAsset.get());
-                                            if (checkMD5.equals("OK")) {
-                                                completed.step();
-                                                completed.setExtraMessage(artifactEntry.getValue().toString());
-                                                totalProgress.step();
-                                                totalProgress.setExtraMessage(artifactEntry.getValue().toString());
-                                            } else {
-                                                failed.step();
-                                                totalProgress.step();
-                                                totalProgress.setExtraMessage(artifactEntry.getValue().toString());
-                                                failed.setExtraMessage(artifactEntry.getValue().toString() + " => Last failure due to MD5 verification: " + checkMD5);
-                                            }
-                                            success(artifactEntry.getValue().toString() + ": MD5 check:" + checkMD5);
-                                        } else {
-                                            failed.step();
-                                            totalProgress.step();
-                                            totalProgress.setExtraMessage(artifactEntry.getValue().toString());
-                                            failed.setExtraMessage(artifactEntry.getValue().toString() + " => Last failure due to: not found after deploy");
-                                            failed(artifactEntry.getValue().toString() + ": Was not found after deployment");
-                                        }
-                                    }));
+                                    Set<DeployStatus> statuses = artifactMap.entrySet().stream()
+                                            .map(artifactEntry -> Pair.of(artifactEntry.getValue(), verify(md5Map, uploadedAssets, artifactEntry)))
+                                            .map(p -> {
+                                                if (p.getRight().equals(DeployStatus.DEPLOYED)) {
+                                                    success(p.getKey().toString());
+                                                } else {
+                                                    failed(p.getKey().toString() + " => " + p.getRight());
+                                                }
+                                                return p.getRight();
+                                            }).collect(Collectors.toSet());
+
+                                    if (statuses.isEmpty() || statuses.contains(DeployStatus.MISSING)) {
+                                        failed.step();
+                                        failed.setExtraMessage("Missing artifacts when deploying " + gav);
+
+                                    } else if (statuses.contains(DeployStatus.CORRUPTED)) {
+                                        failed.step();
+                                        failed.setExtraMessage("Corrupted artifacts when deploying " + gav);
+                                    } else {
+                                        completed.step();
+                                    }
                                 }
                             } catch (Exception e) {
                                 logger.debug("Deployment failed with {}, artifact might be deployed already.", e.getMessage());
+                                failed.step();
+                                failed.setExtraMessage("Exception when deploying " + gav + " => " + e.getMessage());
                                 for (Artifact artifact : deployRequest.getArtifacts()) {
-                                    failed.step();
-                                    failed.setExtraMessage(artifact.toString() + " => " + e.getMessage());
-                                    totalProgress.step();
-                                    totalProgress.setExtraMessage(artifact.toString());
-                                    failed(artifact.toString());
+
+                                    failed(artifact.toString() + " => " + e.getMessage());
                                 }
                             }
+                            totalProgress.step();
                         }
                     });
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    private DeployStatus verify(Map<String, String> md5Map, List<AssetSummary> uploadedAssets, Map.Entry<String, Artifact> artifactEntry) {
+        Optional<AssetSummary> artifactsAsset = uploadedAssets.stream().filter(asset -> asset.getName().equals(artifactEntry.getKey())).findFirst();
+        if (artifactsAsset.isPresent()) {
+            String checkMD5 = checkMD5(md5Map, artifactEntry, artifactsAsset.get());
+            if (checkMD5.equals("OK")) {
+                return DeployStatus.DEPLOYED;
+            } else {
+
+                return DeployStatus.CORRUPTED;
+            }
+
+        } else {
+            return DeployStatus.MISSING;
+        }
+    }
+
+    private DeployRequest createDeployRequest(File leafDirectory, Gav gav, Collection<File> artifacts, RemoteRepository distRepo, Map<String, Artifact> artifactMap, Map<String, String> md5Map) {
+        DeployRequest deployRequest = new DeployRequest();
+        deployRequest.setRepository(distRepo);
+        for (File file : artifacts) {
+            String extension;
+            if (file.getName().endsWith("tar.gz")) {
+                extension = "tar.gz";
+            } else {
+                extension = FilenameUtils.getExtension(file.getName());
+            }
+
+            String baseFileName = gav.getFilenameStart() + "." + extension;
+            String fileName = file.getName();
+            String g = gav.getGroupId();
+            String a = gav.getArtifactId();
+            String v = gav.getVersion();
+
+            Artifact artifact;
+            if (gav.getPomFilename().equals(fileName)) {
+                artifact = new DefaultArtifact(g, a, MavenConstants.POM, v);
+            } else if (gav.getJarFilename().equals(fileName)) {
+                artifact = new DefaultArtifact(g, a, MavenConstants.JAR, v);
+            } else if (gav.getSourceFilename().equals(fileName)) {
+                artifact = new DefaultArtifact(g, a, MavenConstants.SOURCES, MavenConstants.JAR, v);
+            } else if (gav.getJavadocFilename().equals(fileName)) {
+                artifact = new DefaultArtifact(g, a, MavenConstants.JAVADOC, MavenConstants.JAR, v);
+            } else if (baseFileName.equals(fileName)) {
+                artifact = new DefaultArtifact(g, a, extension, v);
+            } else {
+                String classifier =
+                        file.getName().substring(gav.getFilenameStart().length() + 1,
+                                file.getName().length() - ("." + extension).length());
+                artifact = new DefaultArtifact(g, a, classifier, extension, v);
+            }
+
+            artifact = artifact.setFile(file);
+            artifactMap.put(file.getName(), artifact);
+            File md5File = new File(leafDirectory, file.getName() + ".md5");
+            if (md5File.exists()) {
+                try {
+                    md5Map.put(file.getName(), FileUtils.readFileToString(md5File, StandardCharsets.UTF_8));
+                } catch (IOException e) {
+                    md5Map.put(file.getName(), "ERROR while reading");
+                }
+            } else {
+                md5Map.put(file.getName(), "Not Found");
+            }
+            deployRequest.addArtifact(artifact);
+        }
+        return deployRequest;
     }
 
     private void failed(String log) {

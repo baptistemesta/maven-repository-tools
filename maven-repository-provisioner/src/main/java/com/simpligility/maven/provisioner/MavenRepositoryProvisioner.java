@@ -160,30 +160,25 @@ public class MavenRepositoryProvisioner
 
         if ( retriever.hasFailures() )
         {
-          provisioningSuccess = false;
-          provisioningSuccessMessage.append( retriever.getFailureMessage() ).append( "\n" );
-        }
-        else
-        {
-          provisioningSuccess = true;
-          provisioningSuccessMessage.append( "Retrieval completed successfully.\n" );
+            provisioningSuccess = false;
+            provisioningSuccessMessage.append(retriever.getFailureMessage()).append("\n");
+        } else {
+            provisioningSuccess = true;
+            provisioningSuccessMessage.append("Retrieval completed successfully.\n");
         }
       }
 
-      summary.append( deployer.listSucessfulDeployments() ).append( "\n" );
-      summary.append( deployer.listFailedDeployments() ).append( "\n" );
-      summary.append( deployer.listSkippedDeployment() ).append( "\n" );
-      summary.append( deployer.listPotentialDeployment() ).append( "\n" );
+        summary.append(deployer.listSkippedDeployment()).append("\n");
+        summary.append(deployer.listSucessfulDeployments()).append("\n");
+        summary.append(deployer.listPotentialDeployment()).append("\n");
+        summary.append(deployer.listFailedDeployments()).append("\n");
 
-      if ( deployer.hasFailure() )
-      {
-        provisioningSuccess = false;
-        provisioningSuccessMessage.append( deployer.getFailureMessage() ).append( "\n" );
-      }
-      else
-      {
-        provisioningSuccess = true;
-        provisioningSuccessMessage.append( "Deployment completed successfully.\n" );
+        if (deployer.hasFailure()) {
+            provisioningSuccess = false;
+            provisioningSuccessMessage.append(deployer.getFailureMessage()).append("\n");
+        } else {
+            provisioningSuccess = true;
+            provisioningSuccessMessage.append("Deployment completed successfully.\n");
       }
       logger.info( summary.toString() );
 
